@@ -1,0 +1,332 @@
+class CartRemoveButton extends HTMLElement {
+    constructor() {
+        super();
+
+        this.addEventListener('click', (event) => {
+            event.preventDefault();
+            console.log(this, "removeitemThis");
+            const cartItems = this.closest('cart-items') || this.closest('cart-drawer-items');
+            cartItems.updateQuantity(this.dataset.index, 0, "", this.dataset.variantId);
+        });
+    }
+}
+
+customElements.define('cart-remove-button', CartRemoveButton);
+
+class CartItems extends HTMLElement {
+    constructor() {
+        super();
+        this.lineItemStatusElement =
+            document.getElementById('shopping-cart-line-item-status') || document.getElementById('CartDrawer-LineItemStatus');
+
+        const debouncedOnChange = debounce((event) => {
+            console.log("debouncedOnChange running...", event);
+
+            this.onChange(event);
+        }, ON_CHANGE_DEBOUNCE_TIMER);
+
+        this.addEventListener('change', debouncedOnChange.bind(this));
+    }
+
+    cartUpdateUnsubscriber = undefined;
+
+    connectedCallback() {
+        this.cartUpdateUnsubscriber = subscribe(PUB_SUB_EVENTS.cartUpdate, (event) => {
+            if (event.source === 'cart-items') {
+                return;
+            }
+            this.onCartUpdate();
+        });
+    }
+
+    disconnectedCallback() {
+        if (this.cartUpdateUnsubscriber) {
+            this.cartUpdateUnsubscriber();
+        }
+    }
+
+    onChange(event) {
+        this.updateQuantity(event.target.dataset.index, event.target.value, document.activeElement.getAttribute('name'), event.target.dataset.quantityVariantId);
+    }
+
+    onCartUpdate() {
+        console.log("onCartUpdate running...");
+        if (this.tagName === 'CART-DRAWER-ITEMS') {
+            fetch(`${routes.cart_url}?section_id=cart-drawer`)
+                .then((response) => response.text())
+                .then((responseText) => {
+                    const html = new DOMParser().parseFromString(responseText, 'text/html');
+                    const selectors = ['cart-drawer-items', '.cart-drawer__footer'];
+                    for (const selector of selectors) {
+                        const targetElement = document.querySelector(selector);
+                        const sourceElement = html.querySelector(selector);
+                        if (targetElement && sourceElement) {
+                            targetElement.replaceWith(sourceElement);
+                        }
+                    }
+                    console.log("starting...");
+                    let offertext = document.getElementById('offerTextId').innerText;
+                    console.log("offertext ", offertext);
+                    document.getElementById('offer_text_change').innerText = offertext;
+                    console.log("end...");
+                })
+                .catch((e) => {
+                    console.error(e);
+                });
+        } else {
+            fetch(`${routes.cart_url}?section_id=main-cart-items`)
+                .then((response) => response.text())
+                .then((responseText) => {
+                    const html = new DOMParser().parseFromString(responseText, 'text/html');
+                    const sourceQty = html.querySelector('cart-items');
+                    this.innerHTML = sourceQty.innerHTML;
+                    console.log("starting...");
+                    let offertext = document.getElementById('offerTextId').innerText;
+                    console.log("offertext ", offertext);
+                    document.getElementById('offer_text_change').innerText = offertext;
+                    console.log("document.getElementById offer_text_change--", document.getElementById("offer_text_change"));
+
+                    console.log("end...");
+                })
+                .catch((e) => {
+                    console.error(e);
+                });
+        }
+    }
+
+    getSectionsToRender() {
+        return [{
+                id: 'main-cart-items',
+                section: document.getElementById('main-cart-items').dataset.id,
+                selector: '.js-contents',
+            },
+            {
+                id: 'cart-icon-bubble',
+                section: 'cart-icon-bubble',
+                selector: '.shopify-section',
+            },
+            {
+                id: 'cart-live-region-text',
+                section: 'cart-live-region-text',
+                selector: '.shopify-section',
+            },
+            {
+                id: 'main-cart-footer',
+                section: document.getElementById('main-cart-footer').dataset.id,
+                selector: '.js-contents',
+            },
+        ];
+    }
+
+    updateQuantity(line, quantity, name, variantId) {
+
+        this.enableLoading(line);
+
+
+        // Dynamically determine the line index based on variantId
+        const cartItems = document.querySelectorAll('.cart-item'); // Assuming `.cart-item` represents each cart item
+        let actualLineIndex = -1;
+
+        cartItems.forEach((item, index) => {
+            const itemVariantId = item.querySelector(`[data-quantity-variant-id]`) ? .getAttribute('data-quantity-variant-id');
+            if (itemVariantId === variantId.toString()) {
+                actualLineIndex = index + 1; // Shopify's line indexes are 1-based
+            }
+        });
+
+        if (actualLineIndex === -1) {
+            console.error(`No cart item found with variantId: ${variantId}`);
+            return;
+        }
+
+        const body = JSON.stringify({
+            line: actualLineIndex,
+            quantity,
+            sections: this.getSectionsToRender().map((section) => section.section),
+            sections_url: window.location.pathname,
+        });
+
+        fetch(`${routes.cart_change_url}`, { ...fetchConfig(),
+                ...{
+                    body
+                }
+            })
+            .then((response) => {
+                return response.text();
+            })
+            .then((state) => {
+                const parsedState = JSON.parse(state);
+
+                console.log("parsedState=-=-=-=-", parsedState);
+
+
+                const quantityElement =
+                    document.getElementById(`Quantity-${actualLineIndex}`) || document.getElementById(`Drawer-quantity-${actualLineIndex}`);
+                const items = document.querySelectorAll('.cart-item');
+                if (parsedState.errors) {
+                    quantityElement.value = quantityElement.getAttribute('value');
+                    this.updateLiveRegions(line, parsedState.errors);
+                    return;
+                }
+
+                this.classList.toggle('is-empty', parsedState.item_count === 0);
+                const cartDrawerWrapper = document.querySelector('cart-drawer');
+                const cartFooter = document.getElementById('main-cart-footer');
+
+                if (cartFooter) cartFooter.classList.toggle('is-empty', parsedState.item_count === 0);
+                if (cartDrawerWrapper) cartDrawerWrapper.classList.toggle('is-empty', parsedState.item_count === 0);
+
+                this.getSectionsToRender().forEach((section) => {
+                    const elementToReplace =
+                        document.getElementById(section.id).querySelector(section.selector) || document.getElementById(section.id);
+                    elementToReplace.innerHTML = this.getSectionInnerHTML(
+                        parsedState.sections[section.section],
+                        section.selector
+                    );
+                });
+                const updatedValue = parsedState.items[actualLineIndex - 1] ? parsedState.items[actualLineIndex - 1].quantity : undefined;
+                let message = '';
+                if (items.length === parsedState.items.length && updatedValue !== parseInt(quantityElement.value)) {
+                    if (typeof updatedValue === 'undefined') {
+                        message = window.cartStrings.error;
+                    } else {
+                        message = window.cartStrings.quantityError.replace('[quantity]', updatedValue);
+                    }
+                }
+                this.updateLiveRegions(line, message);
+
+                // Update the attribute of your quantity element with the updated quantity
+                const yourChoiceElement = document.querySelector(`#CartDrawer2 input[data-quantity-variant-id="${variantId}"]`);
+
+                if (yourChoiceElement) {
+                    yourChoiceElement.setAttribute('data-cart-quantity', quantity);
+                    yourChoiceElement.value = quantity;
+                }
+
+
+                const lineItem =
+                    document.getElementById(`CartItem-${actualLineIndex}`) || document.getElementById(`CartDrawer-Item-${actualLineIndex}`);
+                if (lineItem && lineItem.querySelector(`[name="${name}"]`)) {
+                    cartDrawerWrapper
+                        ?
+                        trapFocus(cartDrawerWrapper, lineItem.querySelector(`[name="${name}"]`)) :
+                        lineItem.querySelector(`[name="${name}"]`).focus();
+                } else if (parsedState.item_count === 0 && cartDrawerWrapper) {
+                    trapFocus(cartDrawerWrapper.querySelector('.drawer__inner-empty'), cartDrawerWrapper.querySelector('a'));
+                } else if (document.querySelector('.cart-item') && cartDrawerWrapper) {
+                    trapFocus(cartDrawerWrapper, document.querySelector('.cart-item__name'));
+                }
+                publish(PUB_SUB_EVENTS.cartUpdate, {
+                    source: 'cart-items',
+                    cartData: parsedState,
+                    variantId: variantId
+                });
+
+
+            })
+            .catch(() => {
+                this.querySelectorAll('.loading-overlay').forEach((overlay) => overlay.classList.add('hidden'));
+                const errors = document.getElementById('cart-errors') || document.getElementById('CartDrawer-CartErrors');
+                errors.textContent = window.cartStrings.error;
+            })
+            .finally(() => {
+                this.disableLoading(line);
+                console.log("starting...");
+                if (quantity > 0) {
+                    const offerTextElement = document.getElementById('offerTextId');
+                    if (offerTextElement) {
+                        const offertext = offerTextElement.innerText;
+                        const targetElement = document.getElementById('offer_text_change');
+                        if (targetElement) {
+                            targetElement.innerText = offertext;
+                        }
+                    }
+                } else {
+                    document.getElementById('offer_text_change').innerText = "";
+                }
+
+                const defaultMessage = document.getElementById('default-message');
+                const appliedMessage = document.getElementById('applied-message');
+                const isApplied = localStorage.getItem('isCouponApplied') === 'true';
+
+                if (defaultMessage) defaultMessage.style.display = isApplied ? 'none' : 'block';
+                if (appliedMessage) appliedMessage.style.display = isApplied ? 'flex' : 'none';
+
+                console.log("end...");
+            });
+
+    }
+
+
+
+    updateLiveRegions(line, message) {
+        const lineItemError =
+            document.getElementById(`Line-item-error-${line}`) || document.getElementById(`CartDrawer-LineItemError-${line}`);
+        if (lineItemError) lineItemError.querySelector('.cart-item__error-text').innerHTML = message;
+
+        this.lineItemStatusElement.setAttribute('aria-hidden', true);
+
+        const cartStatus =
+            document.getElementById('cart-live-region-text') || document.getElementById('CartDrawer-LiveRegionText');
+        cartStatus.setAttribute('aria-hidden', false);
+
+        setTimeout(() => {
+            cartStatus.setAttribute('aria-hidden', true);
+        }, 1000);
+    }
+
+    getSectionInnerHTML(html, selector) {
+        return new DOMParser().parseFromString(html, 'text/html').querySelector(selector).innerHTML;
+    }
+
+    enableLoading(line) {
+        const mainCartItems = document.getElementById('main-cart-items') || document.getElementById('CartDrawer-CartItems');
+        mainCartItems.classList.add('cart__items--disabled');
+
+        const cartItemElements = this.querySelectorAll(`#CartItem-${line} .loading-overlay`);
+        const cartDrawerItemElements = this.querySelectorAll(`#CartDrawer-Item-${line} .loading-overlay`);
+
+        [...cartItemElements, ...cartDrawerItemElements].forEach((overlay) => overlay.classList.remove('hidden'));
+
+        document.activeElement.blur();
+        this.lineItemStatusElement.setAttribute('aria-hidden', false);
+    }
+
+    disableLoading(line) {
+        const mainCartItems = document.getElementById('main-cart-items') || document.getElementById('CartDrawer-CartItems');
+        mainCartItems.classList.remove('cart__items--disabled');
+
+        const cartItemElements = this.querySelectorAll(`#CartItem-${line} .loading-overlay`);
+        const cartDrawerItemElements = this.querySelectorAll(`#CartDrawer-Item-${line} .loading-overlay`);
+
+        cartItemElements.forEach((overlay) => overlay.classList.add('hidden'));
+        cartDrawerItemElements.forEach((overlay) => overlay.classList.add('hidden'));
+    }
+}
+
+customElements.define('cart-items', CartItems);
+
+if (!customElements.get('cart-note')) {
+    customElements.define(
+        'cart-note',
+        class CartNote extends HTMLElement {
+            constructor() {
+                super();
+
+                this.addEventListener(
+                    'change',
+                    debounce((event) => {
+                        const body = JSON.stringify({
+                            note: event.target.value
+                        });
+                        fetch(`${routes.cart_update_url}`, { ...fetchConfig(),
+                            ...{
+                                body
+                            }
+                        });
+                    }, ON_CHANGE_DEBOUNCE_TIMER)
+                );
+            }
+        }
+    );
+}
